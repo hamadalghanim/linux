@@ -325,4 +325,19 @@
 #define A64_MRS_SP_EL0(Rt) \
 	aarch64_insn_gen_mrs(Rt, AARCH64_INSN_SYSREG_SP_EL0)
 
+/* MOVI Vd.16B, #0 */
+#define A64_MOVI_16B_ZERO(Vd) (0x4F00E400 | ((Vd) & 0x1F))
+
+/* ST1 {v0.16B}, [Rt] */
+#define A64_ST1_16B(Rt) \
+    (0x4C007000 | ((Rt & 0x1F) << 5) | (0 & 0x1F))
+
+/* ST1 {v0.16B, v1.16B}, [Rt] */
+#define A64_ST1_16B_2Q(Rt) \
+    (0x4C00A000 | ((Rt & 0x1F) << 5) | (0 & 0x1F))
+
+/* ST1 {v0.16B, v1.16B, v2.16B, v3.16B}, [Rt] */
+#define A64_ST1_16B_4Q(Rt) \
+    (0x4C002000 | ((Rt & 0x1F) << 5) | (0 & 0x1F))
+
 #endif /* _BPF_JIT_H */

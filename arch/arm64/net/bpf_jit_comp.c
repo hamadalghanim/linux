@@ -85,6 +85,11 @@ struct jit_ctx {
 	u64 arena_vm_start;
 	bool fp_used;
 	bool write;
+	bool vectorizing;
+	int vector_start;
+	int vector_size;
+	u8 vector_dst;
+	u8 vector_src;
 };
 
 struct bpf_plt {
@@ -1055,6 +1060,147 @@ static int add_exception_handler(const struct bpf_insn *insn,
 	return 0;
 }
 
+static int track_memset_operations(struct jit_ctx *ctx, u8 code, u8 dst, int off_adj) {
+	int size;
+	switch (BPF_SIZE(code)) {
+		case BPF_B:
+			size = 1;
+			break;
+		case BPF_H:
+			size = 2;
+			break;
+		case BPF_W:
+			size = 4;
+			break;
+		case BPF_DW:
+			size = 8;
+			break;
+		default:
+			pr_info("Unknown size in memset operation");
+			return -1; // unknown size
+	}
+	if (ctx->vectorizing) {
+		int expected_next = ctx->vector_start - ctx->vector_size;
+		pr_info("Vectorizing: dst=x%d, current size=%d, start=%d, expected_next=%d, actual=%d",
+			dst, ctx->vector_size, ctx->vector_start, expected_next, off_adj);
+		if (off_adj == expected_next) {
+			ctx->vector_size += size;
+			pr_info("Extending vector operation: new size=%d", ctx->vector_size);
+			return 0;
+		} else {
+			pr_info("Vectorizing mismatch: expected offset %d, got %d",
+				expected_next, off_adj);
+			return -1; // mismatch
+		}
+	} else {
+		ctx->vectorizing = true;
+		ctx->vector_start = off_adj;
+		ctx->vector_size = size;
+		ctx->vector_dst = dst;
+		pr_info("Started vectorizing: dst=x%d, offset=%d, initial size=%d",
+			dst, off_adj, size);
+		return 0;
+	}
+}
+
+static void emit_vectorized_memset(struct jit_ctx *ctx) {
+    int size = ctx->vector_size;
+    u8 base_reg = ctx->vector_dst;
+    int offset = ctx->vector_start;
+    u8 src = ctx->vector_src;
+
+    u8 temp_reg = bpf2a64[TMP_REG_1];
+    pr_info("emitting memset for size %d bytes", size);
+
+    // Zero out NEON registers first
+    if (size >= 16) {
+        emit(A64_MOVI_16B_ZERO(0), ctx);
+        if (size >= 32) {
+            emit(A64_MOVI_16B_ZERO(1), ctx);
+            if (size >= 64) {
+                emit(A64_MOVI_16B_ZERO(2), ctx);
+                emit(A64_MOVI_16B_ZERO(3), ctx);
+            }
+        }
+    }
+
+    // Process 64-byte chunks
+    while (size >= 64) {
+        // First, prepare the address
+        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+        pr_info("add x%d, x%d, #%d    /* Prepare address for 64-byte store */",
+            temp_reg, base_reg, offset);
+
+        // Then do the store
+        emit(A64_ST1_16B_4Q(temp_reg), ctx);
+        pr_info("st1 {v0.16b-v3.16b}, [x%d]    /* Store 64 bytes of zeros */", temp_reg);
+
+        offset -= 64;
+        size -= 64;
+    }
+
+    // Process 32-byte chunk
+    if (size >= 32) {
+        // First, prepare the address
+        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+        pr_info("add x%d, x%d, #%d    /* Prepare address for 32-byte store */",
+            temp_reg, base_reg, offset);
+
+        // Then do the store
+        emit(A64_ST1_16B_2Q(temp_reg), ctx);
+        pr_info("st1 {v0.16b-v1.16b}, [x%d]    /* Store 32 bytes of zeros */", temp_reg);
+
+        offset -= 32;
+        size -= 32;
+    }
+
+    // Process 16-byte chunk
+    if (size >= 16) {
+        // First, prepare the address
+        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+        pr_info("add x%d, x%d, #%d    /* Prepare address for 16-byte store */",
+            temp_reg, base_reg, offset);
+
+        // Then do the store - using a single 16B store
+        emit(A64_ST1_16B(temp_reg), ctx);  // You'll need to define this macro
+        pr_info("st1 {v0.16b}, [x%d]    /* Store 16 bytes of zeros */", temp_reg);
+
+        offset -= 16;
+        size -= 16;
+    }
+
+    // Handle remaining bytes with scalar stores
+
+    // Store 8 bytes
+    while (size >= 8) {
+        emit(A64_STR64I(src, base_reg, offset), ctx);
+        pr_info("str d0, [x%d, #%d]    /* Store 8 bytes of zeros */", base_reg, offset);
+        offset += 8;
+        size -= 8;
+    }
+
+    // Store 4 bytes
+    if (size >= 4) {
+        emit(A64_STR32I(src, base_reg, offset), ctx);
+        pr_info("str s0, [x%d, #%d]    /* Store 4 bytes of zeros */", base_reg, offset);
+        offset -= 4;
+        size -= 4;
+    }
+
+    // Store 2 bytes
+    if (size >= 2) {
+        emit(A64_STRHI(0, base_reg, offset), ctx);
+        pr_info("str h0, [x%d, #%d]    /* Store 2 bytes of zeros */", base_reg, offset);
+        offset -= 2;
+        size -= 2;
+    }
+
+    // Store 1 byte
+    if (size >= 1) {
+        emit(A64_STRBI(0, base_reg, offset), ctx);
+        pr_info("str b0, [x%d, #%d]    /* Store 1 byte of zeros */", base_reg, offset);
+    }
+}
 /* JITs an eBPF instruction.
  * Returns:
  * 0  - successfully JITed an 8-byte eBPF instruction.
@@ -1084,7 +1230,12 @@ static int build_insn(const struct bpf_insn *insn, struct jit_ctx *ctx,
 	int off_adj;
 	int ret;
 	bool sign_extend;
-
+	if ((BPF_MODE(code) != BPF_MEM || src != ctx->vector_src) && ctx->vectorizing) {
+		// stop vectorizing
+		// emit vectorizing
+		emit_vectorized_memset(ctx);
+		ctx->vectorizing = false;
+	}
 	switch (code) {
 	/* dst = src */
 	case BPF_ALU | BPF_MOV | BPF_X:
@@ -1223,6 +1374,10 @@ emit_bswap_uxt:
 	/* dst = imm */
 	case BPF_ALU | BPF_MOV | BPF_K:
 	case BPF_ALU64 | BPF_MOV | BPF_K:
+		if(imm == 0){
+			pr_info("storing 32bit imm: %d, into: %d", imm, dst);
+			ctx->vector_src = dst;
+		}
 		emit_a64_mov_i(is64, dst, imm, ctx);
 		break;
 	/* dst = dst OP imm */
@@ -1478,6 +1633,7 @@ emit_cond_jmp:
 	/* dst = imm64 */
 	case BPF_LD | BPF_IMM | BPF_DW:
 	{
+
 		const struct bpf_insn insn1 = insn[1];
 		u64 imm64;
 
@@ -1676,6 +1832,31 @@ emit_cond_jmp:
 			dst_adj = dst;
 			off_adj = off;
 		}
+		if (BPF_MODE(code) == BPF_MEM && src == ctx->vector_src) {
+
+			// Detected memset-like store: [(dst + off)] = rx
+			// where rx has been set to 0
+			// assuming we start with load 0 into some register
+			int result = track_memset_operations(ctx, code, dst_adj, off_adj);
+
+			if (result == 0) {
+				return 0;
+			} else {
+				// Pattern broken
+				emit_vectorized_memset(ctx);
+				ctx->vectorizing = false;
+
+				// Restart tracking from this point
+				track_memset_operations(ctx, code, dst_adj, off_adj);
+
+				return 0;
+			}
+		} else if (ctx->vectorizing) {
+			emit_vectorized_memset(ctx);
+			ctx->vectorizing = false;
+		}
+
+
 		switch (BPF_SIZE(code)) {
 		case BPF_W:
 			if (is_lsi_offset(off_adj, 2)) {
@@ -1745,7 +1926,6 @@ emit_cond_jmp:
 
 	return 0;
 }
-
 static int build_body(struct jit_ctx *ctx, bool extra_pass)
 {
 	const struct bpf_prog *prog = ctx->prog;
