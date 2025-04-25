@@ -1112,62 +1112,62 @@ static void emit_vectorized_memset(struct jit_ctx *ctx) {
     u8 temp_reg = bpf2a64[TMP_REG_1];
     pr_info("emitting memset for size %d bytes", size);
 
-    // Zero out NEON registers first
-    if (size >= 16) {
-        emit(A64_MOVI_16B_ZERO(0), ctx);
-        if (size >= 32) {
-            emit(A64_MOVI_16B_ZERO(1), ctx);
-            if (size >= 64) {
-                emit(A64_MOVI_16B_ZERO(2), ctx);
-                emit(A64_MOVI_16B_ZERO(3), ctx);
-            }
-        }
-    }
-
-    // Process 64-byte chunks
-    while (size >= 64) {
-        // First, prepare the address
-        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
-        pr_info("add x%d, x%d, #%d    /* Prepare address for 64-byte store */",
-            temp_reg, base_reg, offset);
-
-        // Then do the store
-        emit(A64_ST1_16B_4Q(temp_reg), ctx);
-        pr_info("st1 {v0.16b-v3.16b}, [x%d]    /* Store 64 bytes of zeros */", temp_reg);
-
-        offset -= 64;
-        size -= 64;
-    }
-
-    // Process 32-byte chunk
-    if (size >= 32) {
-        // First, prepare the address
-        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
-        pr_info("add x%d, x%d, #%d    /* Prepare address for 32-byte store */",
-            temp_reg, base_reg, offset);
-
-        // Then do the store
-        emit(A64_ST1_16B_2Q(temp_reg), ctx);
-        pr_info("st1 {v0.16b-v1.16b}, [x%d]    /* Store 32 bytes of zeros */", temp_reg);
-
-        offset -= 32;
-        size -= 32;
-    }
-
-    // Process 16-byte chunk
-    if (size >= 16) {
-        // First, prepare the address
-        emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
-        pr_info("add x%d, x%d, #%d    /* Prepare address for 16-byte store */",
-            temp_reg, base_reg, offset);
-
-        // Then do the store - using a single 16B store
-        emit(A64_ST1_16B(temp_reg), ctx);  // You'll need to define this macro
-        pr_info("st1 {v0.16b}, [x%d]    /* Store 16 bytes of zeros */", temp_reg);
-
-        offset -= 16;
-        size -= 16;
-    }
+    // // Zero out NEON registers first
+    // if (size >= 16) {
+    //     emit(A64_MOVI_16B_ZERO(0), ctx);
+    //     if (size >= 32) {
+    //         emit(A64_MOVI_16B_ZERO(1), ctx);
+    //         if (size >= 64) {
+    //             emit(A64_MOVI_16B_ZERO(2), ctx);
+    //             emit(A64_MOVI_16B_ZERO(3), ctx);
+    //         }
+    //     }
+    // }
+    //
+    // // Process 64-byte chunks
+    // while (size >= 64) {
+    //     // First, prepare the address
+    //     emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+    //     pr_info("add x%d, x%d, #%d    /* Prepare address for 64-byte store */",
+    //         temp_reg, base_reg, offset);
+    //
+    //     // Then do the store
+    //     emit(A64_ST1_16B_4Q(temp_reg), ctx);
+    //     pr_info("st1 {v0.16b-v3.16b}, [x%d]    /* Store 64 bytes of zeros */", temp_reg);
+    //
+    //     offset -= 64;
+    //     size -= 64;
+    // }
+    //
+    // // Process 32-byte chunk
+    // if (size >= 32) {
+    //     // First, prepare the address
+    //     emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+    //     pr_info("add x%d, x%d, #%d    /* Prepare address for 32-byte store */",
+    //         temp_reg, base_reg, offset);
+    //
+    //     // Then do the store
+    //     emit(A64_ST1_16B_2Q(temp_reg), ctx);
+    //     pr_info("st1 {v0.16b-v1.16b}, [x%d]    /* Store 32 bytes of zeros */", temp_reg);
+    //
+    //     offset -= 32;
+    //     size -= 32;
+    // }
+    //
+    // // Process 16-byte chunk
+    // if (size >= 16) {
+    //     // First, prepare the address
+    //     emit(A64_ADD_I(1, temp_reg, base_reg, offset), ctx);
+    //     pr_info("add x%d, x%d, #%d    /* Prepare address for 16-byte store */",
+    //         temp_reg, base_reg, offset);
+    //
+    //     // Then do the store - using a single 16B store
+    //     emit(A64_ST1_16B(temp_reg), ctx);  // You'll need to define this macro
+    //     pr_info("st1 {v0.16b}, [x%d]    /* Store 16 bytes of zeros */", temp_reg);
+    //
+    //     offset -= 16;
+    //     size -= 16;
+    // }
 
     // Handle remaining bytes with scalar stores
 
@@ -1175,7 +1175,7 @@ static void emit_vectorized_memset(struct jit_ctx *ctx) {
     while (size >= 8) {
         emit(A64_STR64I(src, base_reg, offset), ctx);
         pr_info("str d0, [x%d, #%d]    /* Store 8 bytes of zeros */", base_reg, offset);
-        offset += 8;
+        offset -= 8;
         size -= 8;
     }
 
